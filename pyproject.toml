@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mojo-polars"
+version = "0.1.0"
+description = "Mojo-backed numeric expression kernels with a Polars-shaped Python API"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+license = {text = "MIT"}
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]
