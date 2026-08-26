@@ -1413,7 +1413,7 @@ def mp_cumulative(
     n: Int,
     op: Int,
     reverse: Int,
-) abi("C"):
+) abi("C") -> Float64:
     var a = fp(a_addr)
     var av = bp(av_addr)
     var dst = fp(dst_addr)
@@ -1436,6 +1436,91 @@ def mp_cumulative(
             acc = value if not seen else max(acc, value)
         seen = True
         dst[i] = acc
+    return acc
+
+
+@export("mp_add_offset")
+def mp_add_offset(
+    dst_addr: Int,
+    dv_addr: Int,
+    n: Int,
+    offset: Float64,
+) abi("C"):
+    var dst = fp(dst_addr)
+    var dv = bp(dv_addr)
+    comptime W = simdwidthof[DType.float64]()
+    var addend = SIMD[DType.float64, W](offset)
+    var i = 0
+    while i + W <= n:
+        var values = dst.load[width=W](i)
+        var present = dv.load[width=W](i).ne(0)
+        dst.store(i, present.select(values + addend, values))
+        i += W
+    while i < n:
+        if dv[i] != 0:
+            dst[i] += offset
+        i += 1
+
+
+@export("mp_cumulative_sum")
+def mp_cumulative_sum(
+    a_addr: Int,
+    av_addr: Int,
+    dst_addr: Int,
+    dv_addr: Int,
+    n: Int,
+    initial: Float64,
+    reverse: Int,
+) abi("C") -> Float64:
+    var a = fp(a_addr)
+    var av = bp(av_addr)
+    var dst = fp(dst_addr)
+    var dv = bp(dv_addr)
+    var acc = initial
+    for step in range(n):
+        var i = n - 1 - step if reverse != 0 else step
+        dv[i] = av[i]
+        if av[i] != 0:
+            acc += a[i]
+            dst[i] = acc
+    return acc
+
+
+@export("mp_cumulative_offsets")
+def mp_cumulative_offsets(
+    a_addr: Int,
+    av_addr: Int,
+    offsets_addr: Int,
+    n: Int,
+    chunk: Int,
+    tasks: Int,
+    reverse: Int,
+) abi("C"):
+    var a = fp(a_addr)
+    var av = bp(av_addr)
+    var offsets = fp(offsets_addr)
+    var acc = 0.0
+    if reverse == 0:
+        var task = 0
+        var boundary = 0
+        for i in range(n):
+            if i == boundary:
+                offsets[task] = acc
+                task += 1
+                boundary += chunk
+            if av[i] != 0:
+                acc += a[i]
+        return
+    var task = tasks - 1
+    var boundary = n - 1
+    for step in range(n):
+        var i = n - 1 - step
+        if i == boundary:
+            offsets[task] = acc
+            task -= 1
+            boundary = min(n, (task + 1) * chunk) - 1
+        if av[i] != 0:
+            acc += a[i]
 
 
 @export("mp_rolling")
@@ -1450,6 +1535,7 @@ def mp_rolling(
     min_periods: Int,
     op: Int,
     ddof: Int,
+    output_skip: Int,
 ) abi("C"):
     var a = fp(a_addr)
     var av = bp(av_addr)
@@ -1501,18 +1587,183 @@ def mp_rolling(
         var valid = count >= min_periods
         if op == 4 or op == 5:
             valid = valid and count > ddof
-        dv[i] = UInt8(1) if valid else UInt8(0)
+        if i < output_skip:
+            continue
+        var output_i = i - output_skip
+        dv[output_i] = UInt8(1) if valid else UInt8(0)
         if not valid:
             continue
         if op == 0:
-            dst[i] = total
+            dst[output_i] = total
         elif op == 1:
-            dst[i] = mean
+            dst[output_i] = mean
         elif op == 2 or op == 3:
-            dst[i] = a[Int(queue[head])]
+            dst[output_i] = a[Int(queue[head])]
         else:
             var variance = max(moment2, 0.0) / Float64(count - ddof)
-            dst[i] = sqrt(variance) if op == 5 else variance
+            dst[output_i] = sqrt(variance) if op == 5 else variance
+
+
+@export("mp_filter_compare")
+def mp_filter_compare(
+    source_addr: Int,
+    source_valid_addr: Int,
+    a_addr: Int,
+    av_addr: Int,
+    b_addr: Int,
+    bv_addr: Int,
+    a_scalar: Float64,
+    b_scalar: Float64,
+    a_op: Int,
+    b_op: Int,
+    a_scalar_left: Int,
+    b_scalar_left: Int,
+    dst_addr: Int,
+    dv_addr: Int,
+    n: Int,
+) abi("C") -> Int:
+    var source = fp(source_addr)
+    var source_valid = bp(source_valid_addr)
+    var a = fp(a_addr)
+    var av = bp(av_addr)
+    var b = fp(b_addr)
+    var bv = bp(bv_addr)
+    var dst = fp(dst_addr)
+    var dv = bp(dv_addr)
+    comptime W = simdwidthof[DType.float64]()
+    var asimd = SIMD[DType.float64, W](a_scalar)
+    var bsimd = SIMD[DType.float64, W](b_scalar)
+    var written = 0
+    var i = 0
+    if a_op == 11 and b_op == 9 and a_scalar_left == 0 and b_scalar_left == 0:
+        while i + W <= n:
+            var predicate = a.load[width=W](i).gt(asimd) & b.load[width=W](i).lt(bsimd)
+            var present = av.load[width=W](i).ne(0) & bv.load[width=W](i).ne(0)
+            for lane in range(W):
+                if present[lane] and predicate[lane]:
+                    dst[written] = source[i + lane]
+                    dv[written] = source_valid[i + lane]
+                    written += 1
+            i += W
+        while i < n:
+            if av[i] != 0 and bv[i] != 0 and a[i] > a_scalar and b[i] < b_scalar:
+                dst[written] = source[i]
+                dv[written] = source_valid[i]
+                written += 1
+            i += 1
+        return written
+    while i + W <= n:
+        var predicate = compare_vector(
+            a.load[width=W](i), asimd, a_op, a_scalar_left != 0
+        ) & compare_vector(
+            b.load[width=W](i), bsimd, b_op, b_scalar_left != 0
+        )
+        var present = av.load[width=W](i).ne(0) & bv.load[width=W](i).ne(0)
+        for lane in range(W):
+            if present[lane] and predicate[lane]:
+                dst[written] = source[i + lane]
+                dv[written] = source_valid[i + lane]
+                written += 1
+        i += W
+    while i < n:
+        if av[i] != 0 and bv[i] != 0 and compare_scalar(
+            a[i], a_scalar, a_op, a_scalar_left != 0
+        ) and compare_scalar(b[i], b_scalar, b_op, b_scalar_left != 0):
+            dst[written] = source[i]
+            dv[written] = source_valid[i]
+            written += 1
+        i += 1
+    return written
+
+
+@export("mp_mark_dense_int")
+def mp_mark_dense_int(
+    labels_addr: Int,
+    present_addr: Int,
+    n: Int,
+    maximum: Int,
+) abi("C") -> Int:
+    var labels = ip(labels_addr)
+    var present = bp(present_addr)
+    var upper = 0
+    for i in range(n):
+        var value = Int(labels[i])
+        if value < 0 or value > maximum:
+            return -1
+        present[value] = UInt8(1)
+        upper = max(upper, value)
+    return upper
+
+
+@export("mp_filter_compare2")
+def mp_filter_compare2(
+    source0_addr: Int,
+    source0_valid_addr: Int,
+    source1_addr: Int,
+    source1_valid_addr: Int,
+    a_addr: Int,
+    av_addr: Int,
+    b_addr: Int,
+    bv_addr: Int,
+    a_scalar: Float64,
+    b_scalar: Float64,
+    a_op: Int,
+    b_op: Int,
+    a_scalar_left: Int,
+    b_scalar_left: Int,
+    dst0_addr: Int,
+    dv0_addr: Int,
+    dst1_addr: Int,
+    dv1_addr: Int,
+    n: Int,
+) abi("C") -> Int:
+    var source0 = fp(source0_addr)
+    var source0_valid = bp(source0_valid_addr)
+    var source1 = fp(source1_addr)
+    var source1_valid = bp(source1_valid_addr)
+    var a = fp(a_addr)
+    var av = bp(av_addr)
+    var b = fp(b_addr)
+    var bv = bp(bv_addr)
+    var dst0 = fp(dst0_addr)
+    var dv0 = bp(dv0_addr)
+    var dst1 = fp(dst1_addr)
+    var dv1 = bp(dv1_addr)
+    comptime W = simdwidthof[DType.float64]()
+    var asimd = SIMD[DType.float64, W](a_scalar)
+    var bsimd = SIMD[DType.float64, W](b_scalar)
+    var written = 0
+    var i = 0
+    while i + W <= n:
+        var predicate: SIMD[DType.bool, W]
+        if a_op == 11 and b_op == 9 and a_scalar_left == 0 and b_scalar_left == 0:
+            predicate = a.load[width=W](i).gt(asimd) & b.load[width=W](i).lt(bsimd)
+        else:
+            predicate = compare_vector(
+                a.load[width=W](i), asimd, a_op, a_scalar_left != 0
+            ) & compare_vector(
+                b.load[width=W](i), bsimd, b_op, b_scalar_left != 0
+            )
+        var present = av.load[width=W](i).ne(0) & bv.load[width=W](i).ne(0)
+        for lane in range(W):
+            if present[lane] and predicate[lane]:
+                dst0[written] = source0[i + lane]
+                dv0[written] = source0_valid[i + lane]
+                dst1[written] = source1[i + lane]
+                dv1[written] = source1_valid[i + lane]
+                written += 1
+        i += W
+    while i < n:
+        if av[i] != 0 and bv[i] != 0 and compare_scalar(
+            a[i], a_scalar, a_op, a_scalar_left != 0
+        ) and compare_scalar(b[i], b_scalar, b_op, b_scalar_left != 0):
+            dst0[written] = source0[i]
+            dv0[written] = source0_valid[i]
+            dst1[written] = source1[i]
+            dv1[written] = source1_valid[i]
+            written += 1
+        i += 1
+    return written
 
 
 @export("mp_filter")

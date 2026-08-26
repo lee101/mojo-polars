@@ -126,6 +126,43 @@ def test_large_fused_paths_cross_parallel_threshold():
     )
 
 
+def test_parallel_scan_window_and_group_paths_keep_tail_rows():
+    size = _kernels.PARALLEL_THRESHOLD + 3
+    values = np.linspace(-1.0, 3.0, size, dtype=np.float64)
+    groups = np.arange(size, dtype=np.int64) % 101
+    ours = pl.Series("x", values)
+    theirs = upstream.Series("x", values)
+
+    np.testing.assert_allclose(
+        ours.cum_sum().to_numpy(),
+        theirs.cum_sum().to_numpy(),
+        rtol=1e-11,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        ours.cum_sum(reverse=True).to_numpy(),
+        theirs.cum_sum(reverse=True).to_numpy(),
+        rtol=1e-11,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        ours.rolling_mean(17).to_numpy(),
+        theirs.rolling_mean(17).to_numpy(),
+        rtol=1e-11,
+        atol=1e-12,
+        equal_nan=True,
+    )
+
+    ours_grouped = pl.DataFrame({"group": groups, "x": values})
+    theirs_grouped = upstream.DataFrame({"group": groups, "x": values})
+    assert_frame(
+        ours_grouped.group_by("group").agg(pl.col("x").sum()).sort("group"),
+        theirs_grouped.group_by("group")
+        .agg(upstream.col("x").sum())
+        .sort("group"),
+    )
+
+
 def test_float64_numpy_input_stays_zero_copy():
     values = np.arange(17, dtype=np.float64)
     series = pl.Series("x", values)

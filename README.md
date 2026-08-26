@@ -94,21 +94,24 @@ elementwise work uses thresholded CPU parallelism.
 
 | kernel | mojo-polars | polars | result |
 | --- | ---: | ---: | ---: |
-| sum (5M) | 3.51 ms | 4.14 ms | 1.18x faster |
-| sqrt(abs(x * 1.5 + y)) (5M) | 19.72 ms | 42.47 ms | 2.15x faster |
-| filter two columns (5M) | 60.84 ms | 19.28 ms | 3.16x slower |
-| cum_sum (5M) | 45.95 ms | 42.34 ms | 1.09x slower |
-| rolling_mean window=128 (5M) | 95.40 ms | 96.78 ms | 1.01x faster |
-| group_by sum 100 groups (5M) | 63.38 ms | 17.26 ms | 3.67x slower |
+| sum (5M) | 3.11 ms | 4.48 ms | 1.44x faster |
+| sqrt(abs(x * 1.5 + y)) (5M) | 28.53 ms | 41.78 ms | 1.46x faster |
+| filter two columns (5M) | 29.14 ms | 26.29 ms | 1.11x slower |
+| cum_sum (5M) | 20.59 ms | 39.71 ms | 1.93x faster |
+| rolling_mean window=128 (5M) | 26.75 ms | 79.15 ms | 2.96x faster |
+| group_by sum 100 groups (5M) | 14.83 ms | 17.76 ms | 1.20x faster |
 
-SIMD reduction and a fused multiply-add/absolute/square-root path now beat
-Polars for sum and the composed expression. Filtering computes selected
-indexes once for all columns, and dense integer grouping keeps its native
-`int64` keys, but Polars still wins those operations with compact Arrow
-bitmaps and its mature grouping engine. Cumulative sum is modestly slower in
-this run, while rolling mean is effectively tied.
+SIMD comparison and compaction avoids a materialized filter mask, while a
+thresholded ordered chunk compaction preserves row order. Large cumulative
+sums use exact sequential chunk-boundary accumulators followed by independent
+chunk scans. Rolling windows use independent chunks with window-sized halos,
+and dense integer group sums use one-pass label marking plus parallel local
+partials. Small inputs remain serial to avoid thread-launch overhead.
 
-No GPU path is included.
+No GPU path is included. These kernels perform at most a handful of arithmetic
+operations while moving roughly 9--27 bytes per row, well below the roughly
+2-flops-per-byte threshold where device transfer and launch overhead can pay
+off. A GPU path would add allocation and copying without a credible speedup.
 
 ## How it works
 

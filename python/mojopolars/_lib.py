@@ -28,9 +28,18 @@ _SIGNATURES = {
     "mp_cast_int": ([I, I, I], None),
     "mp_reduce": ([I, I, I, I, I, I, I], F),
     "mp_arg_reduce": ([I, I, I, I], I),
-    "mp_cumulative": ([I, I, I, I, I, I, I], None),
-    "mp_rolling": ([I] * 10, None),
+    "mp_cumulative": ([I, I, I, I, I, I, I], F),
+    "mp_add_offset": ([I, I, I, F], None),
+    "mp_cumulative_sum": ([I, I, I, I, I, F, I], F),
+    "mp_cumulative_offsets": ([I, I, I, I, I, I, I], None),
+    "mp_rolling": ([I] * 11, None),
     "mp_filter": ([I] * 7, I),
+    "mp_filter_compare": (
+        [I, I, I, I, I, I, F, F, I, I, I, I, I, I, I],
+        I,
+    ),
+    "mp_mark_dense_int": ([I, I, I, I], I),
+    "mp_filter_compare2": ([I] * 8 + [F, F] + [I] * 9, I),
     "mp_group_reduce": ([I] * 11, None),
 }
 

@@ -78,9 +78,11 @@ GROUP_OPS = {
     "var": 7,
     "std": 8,
 }
-SUM_PARALLEL_THRESHOLD = 1_000_000
-SUM_TASKS = 8
-_SUM_POOL = ThreadPoolExecutor(max_workers=SUM_TASKS)
+PARALLEL_THRESHOLD = 1_000_000
+PARALLEL_TASKS = 8
+SUM_PARALLEL_THRESHOLD = PARALLEL_THRESHOLD
+SUM_TASKS = PARALLEL_TASKS
+_POOL = ThreadPoolExecutor(max_workers=PARALLEL_TASKS)
 
 
 def addr(array: np.ndarray) -> int:
@@ -286,7 +288,7 @@ def reduce(
         end = min(start + chunk, a.size)
         if start < end:
             futures.append(
-                _SUM_POOL.submit(
+                _POOL.submit(
                     _reduce_raw,
                     a[start:end],
                     valid[start:end],
@@ -305,6 +307,12 @@ def cast_int(a: np.ndarray) -> np.ndarray:
     return dst
 
 
+def mark_dense_int(labels: np.ndarray, present: np.ndarray) -> int:
+    return int(lib().mp_mark_dense_int(
+        addr(labels), addr(present), labels.size, present.size - 1
+    ))
+
+
 def arg_reduce(a: np.ndarray, valid: np.ndarray, take_max: bool) -> int | None:
     _values(a)
     _valid(valid, size=a.size)
@@ -319,15 +327,37 @@ def cumulative(
     _valid(valid, size=a.size)
     dst = np.empty_like(a)
     dst_valid = np.empty(a.size, dtype=np.uint8)
-    lib().mp_cumulative(
-        addr(a),
-        addr(valid),
-        addr(dst),
-        addr(dst_valid),
-        a.size,
-        CUMULATIVE_OPS[op],
-        int(reverse),
+    op_code = CUMULATIVE_OPS[op]
+    if op != "cum_sum" or a.size < PARALLEL_THRESHOLD:
+        lib().mp_cumulative(
+            addr(a), addr(valid), addr(dst), addr(dst_valid), a.size,
+            op_code, int(reverse),
+        )
+        return dst, dst_valid
+    chunk = (a.size + PARALLEL_TASKS - 1) // PARALLEL_TASKS
+    ranges = [
+        (start, min(start + chunk, a.size))
+        for start in range(0, a.size, chunk)
+    ]
+    offsets = np.empty(len(ranges), dtype=np.float64)
+    lib().mp_cumulative_offsets(
+        addr(a), addr(valid), addr(offsets), a.size, chunk, len(ranges), int(reverse)
     )
+    futures = [
+        _POOL.submit(
+            lib().mp_cumulative_sum,
+            addr(a[start:end]),
+            addr(valid[start:end]),
+            addr(dst[start:end]),
+            addr(dst_valid[start:end]),
+            end - start,
+            float(offsets[task]),
+            int(reverse),
+        )
+        for task, (start, end) in enumerate(ranges)
+    ]
+    for future in futures:
+        future.result()
     return dst, dst_valid
 
 
@@ -349,20 +379,141 @@ def rolling(
         raise ValueError("ddof must be non-negative")
     dst = np.empty_like(a)
     dst_valid = np.empty(a.size, dtype=np.uint8)
-    queue = np.empty(a.size, dtype=np.int64)
-    lib().mp_rolling(
-        addr(a),
-        addr(valid),
-        addr(dst),
-        addr(dst_valid),
-        a.size,
-        addr(queue),
-        window_size,
-        min_samples,
-        ROLLING_OPS[op],
-        ddof,
-    )
+    op_code = ROLLING_OPS[op]
+    if a.size < PARALLEL_THRESHOLD:
+        queue = np.empty(a.size if op_code in (2, 3) else 1, dtype=np.int64)
+        lib().mp_rolling(
+            addr(a), addr(valid), addr(dst), addr(dst_valid), a.size,
+            addr(queue), window_size, min_samples, op_code, ddof, 0,
+        )
+        return dst, dst_valid
+    chunk = (a.size + PARALLEL_TASKS - 1) // PARALLEL_TASKS
+    futures = []
+    queues = []
+    for start in range(0, a.size, chunk):
+        end = min(start + chunk, a.size)
+        input_start = max(0, start - window_size + 1)
+        input_size = end - input_start
+        skip = start - input_start
+        queue = np.empty(input_size if op_code in (2, 3) else 1, dtype=np.int64)
+        queues.append(queue)
+        futures.append(
+            _POOL.submit(
+                lib().mp_rolling,
+                addr(a[input_start:end]),
+                addr(valid[input_start:end]),
+                addr(dst[start:end]),
+                addr(dst_valid[start:end]),
+                input_size,
+                addr(queue),
+                window_size,
+                min_samples,
+                op_code,
+                ddof,
+                skip,
+            )
+        )
+    for future in futures:
+        future.result()
     return dst, dst_valid
+
+
+def filter_compare_values(
+    source: np.ndarray,
+    source_valid: np.ndarray,
+    a: np.ndarray,
+    av: np.ndarray,
+    b: np.ndarray,
+    bv: np.ndarray,
+    a_scalar: float,
+    b_scalar: float,
+    a_op: str,
+    b_op: str,
+    a_scalar_left: bool,
+    b_scalar_left: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    dst = np.empty_like(source)
+    dst_valid = np.empty(source.size, dtype=np.uint8)
+    size = int(
+        lib().mp_filter_compare(
+            addr(source), addr(source_valid), addr(a), addr(av), addr(b), addr(bv),
+            a_scalar, b_scalar, BINARY_OPS[a_op], BINARY_OPS[b_op],
+            int(a_scalar_left), int(b_scalar_left), addr(dst), addr(dst_valid),
+            source.size,
+        )
+    )
+    return dst[:size], dst_valid[:size]
+
+
+def filter_compare_columns(
+    sources: list[tuple[np.ndarray, np.ndarray]],
+    a: np.ndarray,
+    av: np.ndarray,
+    b: np.ndarray,
+    bv: np.ndarray,
+    a_scalar: float,
+    b_scalar: float,
+    a_op: str,
+    b_op: str,
+    a_scalar_left: bool,
+    b_scalar_left: bool,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    if len(sources) == 2:
+        dst0 = np.empty_like(sources[0][0])
+        dv0 = np.empty(sources[0][0].size, dtype=np.uint8)
+        dst1 = np.empty_like(sources[1][0])
+        dv1 = np.empty(sources[1][0].size, dtype=np.uint8)
+        def run(start: int, end: int) -> int:
+            return int(lib().mp_filter_compare2(
+                addr(sources[0][0][start:end]), addr(sources[0][1][start:end]),
+                addr(sources[1][0][start:end]), addr(sources[1][1][start:end]),
+                addr(a[start:end]), addr(av[start:end]), addr(b[start:end]),
+                addr(bv[start:end]), a_scalar, b_scalar, BINARY_OPS[a_op],
+                BINARY_OPS[b_op], int(a_scalar_left), int(b_scalar_left),
+                addr(dst0[start:end]), addr(dv0[start:end]), addr(dst1[start:end]),
+                addr(dv1[start:end]), end - start,
+            ))
+
+        if a.size < PARALLEL_THRESHOLD:
+            size = run(0, a.size)
+            return [(dst0[:size], dv0[:size]), (dst1[:size], dv1[:size])]
+        chunk = (a.size + PARALLEL_TASKS - 1) // PARALLEL_TASKS
+        ranges = [
+            (start, min(start + chunk, a.size))
+            for start in range(0, a.size, chunk)
+        ]
+        sizes = [
+            future.result()
+            for future in [_POOL.submit(run, start, end) for start, end in ranges]
+        ]
+        size = 0
+        for (start, _), part_size in zip(ranges, sizes):
+            if size != start and part_size:
+                dst0[size : size + part_size] = dst0[start : start + part_size]
+                dv0[size : size + part_size] = dv0[start : start + part_size]
+                dst1[size : size + part_size] = dst1[start : start + part_size]
+                dv1[size : size + part_size] = dv1[start : start + part_size]
+            size += part_size
+        return [(dst0[:size], dv0[:size]), (dst1[:size], dv1[:size])]
+    futures = [
+        _POOL.submit(
+            filter_compare_values,
+            source,
+            source_valid,
+            a,
+            av,
+            b,
+            bv,
+            a_scalar,
+            b_scalar,
+            a_op,
+            b_op,
+            a_scalar_left,
+            b_scalar_left,
+        )
+        for source, source_valid in sources
+    ]
+    return [future.result() for future in futures]
 
 
 def filter_values(
@@ -398,31 +549,42 @@ def group_reduce(
     ngroups: int,
     op: str,
     ddof: int,
+    *,
+    validate: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
-    _values(a)
-    _valid(valid, size=a.size)
-    _array(labels, np.dtype(np.int64), "group labels", size=a.size)
+    if validate:
+        _values(a)
+        _valid(valid, size=a.size)
+        _array(labels, np.dtype(np.int64), "group labels", size=a.size)
     if ngroups < 0:
         raise ValueError("ngroups must be non-negative")
-    if labels.size and (labels.min() < 0 or labels.max() >= ngroups):
+    if validate and labels.size and (labels.min() < 0 or labels.max() >= ngroups):
         raise ValueError("group labels must be in [0, ngroups)")
     if ddof < 0:
         raise ValueError("ddof must be non-negative")
-    dst = np.empty(ngroups, dtype=np.float64)
-    work = np.empty(ngroups, dtype=np.float64)
-    dst_valid = np.empty(ngroups, dtype=np.uint8)
-    counts = np.empty(ngroups, dtype=np.int64)
-    lib().mp_group_reduce(
-        addr(a),
-        addr(valid),
-        addr(labels),
-        addr(dst),
-        addr(work),
-        addr(dst_valid),
-        addr(counts),
-        a.size,
-        ngroups,
-        GROUP_OPS[op],
-        ddof,
-    )
+    def run(part_a, part_valid, part_labels):
+        part_dst = np.empty(ngroups, dtype=np.float64)
+        work = np.empty(ngroups, dtype=np.float64)
+        part_dst_valid = np.empty(ngroups, dtype=np.uint8)
+        counts = np.empty(ngroups, dtype=np.int64)
+        lib().mp_group_reduce(
+            addr(part_a), addr(part_valid), addr(part_labels), addr(part_dst),
+            addr(work), addr(part_dst_valid), addr(counts), part_a.size,
+            ngroups, GROUP_OPS[op], ddof,
+        )
+        return part_dst, part_dst_valid
+
+    if op != "sum" or a.size < PARALLEL_THRESHOLD:
+        return run(a, valid, labels)
+    chunk = (a.size + PARALLEL_TASKS - 1) // PARALLEL_TASKS
+    futures = [
+        _POOL.submit(run, a[start:end], valid[start:end], labels[start:end])
+        for start in range(0, a.size, chunk)
+        for end in [min(start + chunk, a.size)]
+    ]
+    parts = [future.result()[0] for future in futures]
+    dst = parts[0]
+    for part in parts[1:]:
+        dst += part
+    dst_valid = np.ones(ngroups, dtype=np.uint8)
     return dst, dst_valid

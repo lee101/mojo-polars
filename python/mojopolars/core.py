@@ -112,6 +112,7 @@ class Series:
             else:
                 valid = np.ascontiguousarray(_valid, dtype=np.uint8)
             self._valid = valid
+            self._all_valid = bool(valid.all())
             if kind == "str":
                 self._values = np.asarray(array, dtype=object)
             else:
@@ -167,6 +168,7 @@ class Series:
         else:
             valid = np.ascontiguousarray(_valid, dtype=np.uint8)
         self._valid = valid
+        self._all_valid = bool(valid.all())
         if kind == "str":
             self._values = np.asarray(
                 ["" if value is None else str(value) for value in raw], dtype=object
@@ -186,6 +188,7 @@ class Series:
         valid: np.ndarray,
         kind: str = "float",
         native_int: np.ndarray | None = None,
+        all_valid: bool | None = None,
     ) -> Series:
         instance = cls.__new__(cls)
         instance._name = name
@@ -195,6 +198,7 @@ class Series:
         )
         instance._valid = np.ascontiguousarray(valid, dtype=np.uint8)
         instance._native_int = native_int
+        instance._all_valid = all_valid
         return instance
 
     @property
@@ -211,6 +215,8 @@ class Series:
 
     @property
     def null_count(self) -> int:
+        if self._all_valid is True:
+            return 0
         return int((self._valid == 0).sum())
 
     def __len__(self) -> int:
@@ -242,6 +248,7 @@ class Series:
                     if self._native_int is None
                     else self._native_int[item]
                 ),
+                True if self._all_valid is True else None,
             )
         index = int(item)
         if not self._valid[index]:
@@ -298,6 +305,7 @@ class Series:
             self._valid,
             self._kind,
             self._native_int,
+            self._all_valid,
         )
 
     def clone(self) -> Series:
@@ -311,6 +319,7 @@ class Series:
                 if self._native_int is None
                 else self._native_int.copy()
             ),
+            self._all_valid,
         )
 
     def _expr(self) -> Expr:
@@ -1495,6 +1504,36 @@ class DataFrame:
         predicate = expressions[0]
         for expression in expressions[1:]:
             predicate = predicate & expression
+        fused = _match_fused_compare(predicate)
+        if fused is not None and all(
+            series._kind != "str" for series in self._columns.values()
+        ):
+            (
+                a_name, b_name, a_scalar, b_scalar, a_op, b_op,
+                a_scalar_left, b_scalar_left,
+            ) = fused
+            a = self._columns[a_name]
+            b = self._columns[b_name]
+            names = list(self._columns)
+            results = K.filter_compare_columns(
+                [
+                    (self._columns[name]._numeric(), self._columns[name]._valid)
+                    for name in names
+                ],
+                a._numeric(), a._valid, b._numeric(), b._valid,
+                a_scalar, b_scalar, a_op, b_op, a_scalar_left, b_scalar_left,
+            )
+            return DataFrame(
+                {
+                    name: Series._from_arrays(
+                        name, values, valid, self._columns[name]._kind,
+                        all_valid=(
+                            True if self._columns[name]._all_valid is True else None
+                        ),
+                    )
+                    for name, (values, valid) in zip(names, results)
+                }
+            )
         mask = _broadcast(predicate._eval(self._columns), self.height)
         indexes = np.flatnonzero(
             (mask._valid != 0) & (mask._values != 0)
@@ -1606,12 +1645,11 @@ class GroupBy:
                     if series._native_int is not None
                     else K.cast_int(series._values)
                 )
-                lower = int(integer_values.min())
-                upper = int(integer_values.max())
-                if lower >= 0 and upper <= 1_000_000:
-                    present = np.bincount(integer_values, minlength=upper + 1) != 0
-                    unique = np.flatnonzero(present)
-                    if lower == 0 and unique.size == upper + 1:
+                present = np.zeros(1_000_001, dtype=np.uint8)
+                upper = K.mark_dense_int(integer_values, present)
+                if upper >= 0:
+                    unique = np.flatnonzero(present[: upper + 1])
+                    if unique.size == upper + 1:
                         groups = [(int(value),) for value in unique]
                         return key_series, integer_values, groups
                     remap = np.full(upper + 1, -1, dtype=np.int64)
@@ -1675,7 +1713,7 @@ class GroupBy:
                 source = np.ones(self._frame.height, dtype=np.float64)
                 valid = np.ones(self._frame.height, dtype=np.uint8)
                 values, out_valid = K.group_reduce(
-                    source, valid, labels, ngroups, "count", 1
+                    source, valid, labels, ngroups, "count", 1, validate=False
                 )
                 kind = "int"
             elif op in K.GROUP_OPS:
@@ -1686,6 +1724,7 @@ class GroupBy:
                     ngroups,
                     op,
                     int(kw.get("ddof", 1)),
+                    validate=False,
                 )
                 kind = "int" if op == "count" else child._kind
             else:
