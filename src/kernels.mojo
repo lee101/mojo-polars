@@ -1,6 +1,5 @@
 """Numeric columnar expression kernels exposed through a compact C ABI."""
 
-from std.algorithm import sync_parallelize
 from std.ffi import external_call
 from std.math import ceil, cos, exp, floor, isnan, pow, sin, sqrt, tan
 from std.sys.info import simd_width_of as simdwidthof
@@ -11,6 +10,14 @@ comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
 comptime PARALLEL_THRESHOLD = 1_000_000
 comptime SUM_PARALLEL_THRESHOLD = 10_000_000
 comptime PARALLEL_TASKS = 8
+
+
+# `sync_parallelize` moved out of the standalone Mojo standard library in 1.1.
+# Keep this package independent of MAX by retaining the same internal calling
+# convention and executing the fixed set of chunks synchronously.
+def sync_parallelize[func: def(Int) capturing -> None](num_work_items: Int):
+    for i in range(num_work_items):
+        func(i)
 
 
 def fp(addr: Int) -> FPtr:
