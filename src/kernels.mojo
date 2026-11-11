@@ -90,8 +90,8 @@ def binary_fast_range[op: Int](
     comptime W = simdwidthof[DType.float64]()
     var i = start
     while i + W <= end:
-        var va = a.load[width=W](i)
-        var vb = b.load[width=W](i)
+        var va = a.unsafe_load[width=W](i)
+        var vb = b.unsafe_load[width=W](i)
         var result: SIMD[DType.float64, W]
         comptime if op == 0:
             result = va + vb
@@ -114,15 +114,15 @@ def binary_fast_range[op: Int](
                 SIMD[DType.float64, W](1.0), SIMD[DType.float64, W](0.0)
             )
         else:
-            var a_true = av.load[width=W](i).ne(0) & va.ne(0.0)
-            var b_true = bv.load[width=W](i).ne(0) & vb.ne(0.0)
+            var a_true = av.unsafe_load[width=W](i).ne(0) & va.ne(0.0)
+            var b_true = bv.unsafe_load[width=W](i).ne(0) & vb.ne(0.0)
             result = (a_true & b_true).select(
                 SIMD[DType.float64, W](1.0), SIMD[DType.float64, W](0.0)
             )
         dst.store(i, result)
         comptime if op == 13:
-            var a_valid = av.load[width=W](i).ne(0)
-            var b_valid = bv.load[width=W](i).ne(0)
+            var a_valid = av.unsafe_load[width=W](i).ne(0)
+            var b_valid = bv.unsafe_load[width=W](i).ne(0)
             var valid = (a_valid & b_valid) | (a_valid & va.eq(0.0)) | (
                 b_valid & vb.eq(0.0)
             )
@@ -133,7 +133,7 @@ def binary_fast_range[op: Int](
                 ),
             )
         else:
-            dv.store(i, av.load[width=W](i) & bv.load[width=W](i))
+            dv.store(i, av.unsafe_load[width=W](i) & bv.unsafe_load[width=W](i))
         i += W
     while i < end:
         var valid = av[i] != 0 and bv[i] != 0
@@ -255,7 +255,7 @@ def scalar_fast_range[op: Int](
     comptime W = simdwidthof[DType.float64]()
     var i = start
     while i + W <= end:
-        var va = a.load[width=W](i)
+        var va = a.unsafe_load[width=W](i)
         var vb = SIMD[DType.float64, W](scalar)
         var left = vb if scalar_left else va
         var right = va if scalar_left else vb
@@ -281,7 +281,7 @@ def scalar_fast_range[op: Int](
                 SIMD[DType.float64, W](1.0), SIMD[DType.float64, W](0.0)
             )
         dst.store(i, result)
-        dv.store(i, av.load[width=W](i))
+        dv.store(i, av.unsafe_load[width=W](i))
         i += W
     while i < end:
         dv[i] = av[i]
@@ -404,12 +404,12 @@ def unary_fast_range[op: Int](
     comptime W = simdwidthof[DType.float64]()
     var i = start
     while i + W <= end:
-        var value = a.load[width=W](i)
+        var value = a.unsafe_load[width=W](i)
         comptime if op == 1:
             dst.store(i, abs(value))
         else:
             dst.store(i, sqrt(value))
-        dv.store(i, av.load[width=W](i))
+        dv.store(i, av.unsafe_load[width=W](i))
         i += W
     while i < end:
         dv[i] = av[i]
@@ -483,9 +483,9 @@ def fused_math_range(
     var i = start
     var factor = SIMD[DType.float64, W](scale)
     while i + W <= end:
-        var result = sqrt(abs(a.load[width=W](i) * factor + b.load[width=W](i)))
+        var result = sqrt(abs(a.unsafe_load[width=W](i) * factor + b.unsafe_load[width=W](i)))
         dst.store(i, result)
-        dv.store(i, av.load[width=W](i) & bv.load[width=W](i))
+        dv.store(i, av.unsafe_load[width=W](i) & bv.unsafe_load[width=W](i))
         i += W
     while i < end:
         var valid = av[i] != 0 and bv[i] != 0
@@ -615,10 +615,10 @@ def fused_compare_range(
     var bsimd = SIMD[DType.float64, W](b_scalar)
     while i + W <= end:
         var predicate = compare_vector(
-            a.load[width=W](i), asimd, a_op, a_scalar_left
-        ) & compare_vector(b.load[width=W](i), bsimd, b_op, b_scalar_left)
+            a.unsafe_load[width=W](i), asimd, a_op, a_scalar_left
+        ) & compare_vector(b.unsafe_load[width=W](i), bsimd, b_op, b_scalar_left)
         dst.store(i, predicate.select(one, zero))
-        dv.store(i, av.load[width=W](i) & bv.load[width=W](i))
+        dv.store(i, av.unsafe_load[width=W](i) & bv.unsafe_load[width=W](i))
         i += W
     while i < end:
         var valid = av[i] != 0 and bv[i] != 0
@@ -715,8 +715,8 @@ def sum_range(a: FPtr, av: BPtr, start: Int, end: Int) -> Float64:
     var totals = SIMD[DType.float64, W](0.0)
     var i = start
     while i + W <= end:
-        var values = a.load[width=W](i)
-        var present = av.load[width=W](i).ne(0)
+        var values = a.unsafe_load[width=W](i)
+        var present = av.unsafe_load[width=W](i).ne(0)
         totals += present.select(values, SIMD[DType.float64, W](0.0))
         i += W
     var total = totals.reduce_add()
@@ -735,13 +735,13 @@ def sum_all_range(a: FPtr, start: Int, end: Int) -> Float64:
     var total3 = SIMD[DType.float64, W](0.0)
     var i = start
     while i + 4 * W <= end:
-        total0 += a.load[width=W](i)
-        total1 += a.load[width=W](i + W)
-        total2 += a.load[width=W](i + 2 * W)
-        total3 += a.load[width=W](i + 3 * W)
+        total0 += a.unsafe_load[width=W](i)
+        total1 += a.unsafe_load[width=W](i + W)
+        total2 += a.unsafe_load[width=W](i + 2 * W)
+        total3 += a.unsafe_load[width=W](i + 3 * W)
         i += 4 * W
     while i + W <= end:
-        total0 += a.load[width=W](i)
+        total0 += a.unsafe_load[width=W](i)
         i += W
     var total = (total0 + total1 + total2 + total3).reduce_add()
     while i < end:
@@ -785,7 +785,7 @@ def cast_int_range(a: FPtr, dst: IPtr, start: Int, end: Int):
     comptime W = simdwidthof[DType.float64]()
     var i = start
     while i + W <= end:
-        dst.store(i, a.load[width=W](i).cast[DType.int64]())
+        dst.store(i, a.unsafe_load[width=W](i).cast[DType.int64]())
         i += W
     while i < end:
         dst[i] = Int64(a[i])
@@ -907,8 +907,8 @@ def mp_binary(
     comptime W = simdwidthof[DType.float64]()
     var i = 0
     while i + W <= n:
-        var va = a.load[width=W](i)
-        var vb = b.load[width=W](i)
+        var va = a.unsafe_load[width=W](i)
+        var vb = b.unsafe_load[width=W](i)
         var result: SIMD[DType.float64, W]
         if op == 0:
             result = va + vb
@@ -961,8 +961,8 @@ def mp_binary(
         else:
             result = max(va, vb)
         if op == 14:
-            var a_valid = av.load[width=W](i).ne(0)
-            var b_valid = bv.load[width=W](i).ne(0)
+            var a_valid = av.unsafe_load[width=W](i).ne(0)
+            var b_valid = bv.unsafe_load[width=W](i).ne(0)
             var a_true = a_valid & va.ne(0.0)
             var b_true = b_valid & vb.ne(0.0)
             result = (a_true | b_true).select(
@@ -977,7 +977,7 @@ def mp_binary(
         else:
             dv.store(
                 i,
-                av.load[width=W](i) & bv.load[width=W](i),
+                av.unsafe_load[width=W](i) & bv.unsafe_load[width=W](i),
             )
         dst.store(i, result)
         i += W
@@ -1091,7 +1091,7 @@ def mp_scalar(
     comptime W = simdwidthof[DType.float64]()
     var i = 0
     while i + W <= n:
-        var va = a.load[width=W](i)
+        var va = a.unsafe_load[width=W](i)
         var vb = SIMD[DType.float64, W](scalar)
         var left = vb if scalar_left != 0 else va
         var right = va if scalar_left != 0 else vb
@@ -1147,21 +1147,21 @@ def mp_scalar(
         else:
             result = max(left, right)
         if op == 13:
-            var valid = av.load[width=W](i).ne(0) | vb.eq(0.0)
-            result = (av.load[width=W](i).ne(0) & va.ne(0.0) & vb.ne(0.0)).select(
+            var valid = av.unsafe_load[width=W](i).ne(0) | vb.eq(0.0)
+            result = (av.unsafe_load[width=W](i).ne(0) & va.ne(0.0) & vb.ne(0.0)).select(
                 SIMD[DType.float64, W](1.0), SIMD[DType.float64, W](0.0)
             )
             dv.store(i, valid.select(SIMD[DType.uint8, W](1), SIMD[DType.uint8, W](0)))
         elif op == 14:
-            var valid = av.load[width=W](i).ne(0) | vb.ne(0.0)
+            var valid = av.unsafe_load[width=W](i).ne(0) | vb.ne(0.0)
             result = (
-                vb.ne(0.0) | (av.load[width=W](i).ne(0) & va.ne(0.0))
+                vb.ne(0.0) | (av.unsafe_load[width=W](i).ne(0) & va.ne(0.0))
             ).select(
                 SIMD[DType.float64, W](1.0), SIMD[DType.float64, W](0.0)
             )
             dv.store(i, valid.select(SIMD[DType.uint8, W](1), SIMD[DType.uint8, W](0)))
         else:
-            dv.store(i, av.load[width=W](i))
+            dv.store(i, av.unsafe_load[width=W](i))
         dst.store(i, result)
         i += W
     while i < n:
@@ -1221,7 +1221,7 @@ def mp_unary(
     var i = 0
     if op != 4 and op != 12:
         while i + W <= n:
-            var value = a.load[width=W](i)
+            var value = a.unsafe_load[width=W](i)
             var result: SIMD[DType.float64, W]
             if op == 0:
                 result = -value
@@ -1268,7 +1268,7 @@ def mp_unary(
             else:
                 result = value
             dst.store(i, result)
-            dv.store(i, av.load[width=W](i))
+            dv.store(i, av.unsafe_load[width=W](i))
             i += W
     while i < n:
         dv[i] = av[i]
@@ -1452,8 +1452,8 @@ def mp_add_offset(
     var addend = SIMD[DType.float64, W](offset)
     var i = 0
     while i + W <= n:
-        var values = dst.load[width=W](i)
-        var present = dv.load[width=W](i).ne(0)
+        var values = dst.unsafe_load[width=W](i)
+        var present = dv.unsafe_load[width=W](i).ne(0)
         dst.store(i, present.select(values + addend, values))
         i += W
     while i < n:
@@ -1637,8 +1637,8 @@ def mp_filter_compare(
     var i = 0
     if a_op == 11 and b_op == 9 and a_scalar_left == 0 and b_scalar_left == 0:
         while i + W <= n:
-            var predicate = a.load[width=W](i).gt(asimd) & b.load[width=W](i).lt(bsimd)
-            var present = av.load[width=W](i).ne(0) & bv.load[width=W](i).ne(0)
+            var predicate = a.unsafe_load[width=W](i).gt(asimd) & b.unsafe_load[width=W](i).lt(bsimd)
+            var present = av.unsafe_load[width=W](i).ne(0) & bv.unsafe_load[width=W](i).ne(0)
             for lane in range(W):
                 if present[lane] and predicate[lane]:
                     dst[written] = source[i + lane]
@@ -1654,11 +1654,11 @@ def mp_filter_compare(
         return written
     while i + W <= n:
         var predicate = compare_vector(
-            a.load[width=W](i), asimd, a_op, a_scalar_left != 0
+            a.unsafe_load[width=W](i), asimd, a_op, a_scalar_left != 0
         ) & compare_vector(
-            b.load[width=W](i), bsimd, b_op, b_scalar_left != 0
+            b.unsafe_load[width=W](i), bsimd, b_op, b_scalar_left != 0
         )
-        var present = av.load[width=W](i).ne(0) & bv.load[width=W](i).ne(0)
+        var present = av.unsafe_load[width=W](i).ne(0) & bv.unsafe_load[width=W](i).ne(0)
         for lane in range(W):
             if present[lane] and predicate[lane]:
                 dst[written] = source[i + lane]
@@ -1737,14 +1737,14 @@ def mp_filter_compare2(
     while i + W <= n:
         var predicate: SIMD[DType.bool, W]
         if a_op == 11 and b_op == 9 and a_scalar_left == 0 and b_scalar_left == 0:
-            predicate = a.load[width=W](i).gt(asimd) & b.load[width=W](i).lt(bsimd)
+            predicate = a.unsafe_load[width=W](i).gt(asimd) & b.unsafe_load[width=W](i).lt(bsimd)
         else:
             predicate = compare_vector(
-                a.load[width=W](i), asimd, a_op, a_scalar_left != 0
+                a.unsafe_load[width=W](i), asimd, a_op, a_scalar_left != 0
             ) & compare_vector(
-                b.load[width=W](i), bsimd, b_op, b_scalar_left != 0
+                b.unsafe_load[width=W](i), bsimd, b_op, b_scalar_left != 0
             )
-        var present = av.load[width=W](i).ne(0) & bv.load[width=W](i).ne(0)
+        var present = av.unsafe_load[width=W](i).ne(0) & bv.unsafe_load[width=W](i).ne(0)
         for lane in range(W):
             if present[lane] and predicate[lane]:
                 dst0[written] = source0[i + lane]
